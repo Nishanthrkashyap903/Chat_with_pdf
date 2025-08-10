@@ -7,3 +7,4 @@ yarn-debug.log*
 yarn-error.log*
 # Docker volumes
 mongodb_data/
+uploads/
