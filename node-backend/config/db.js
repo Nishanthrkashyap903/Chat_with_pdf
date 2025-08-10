@@ -12,6 +12,10 @@ const options = {
 };
 
 export async function connectToDatabase() {
+    // Validate required env
+    if (!uri) {
+        throw new Error('MONGODB_URI is not set in environment');
+    }
     try {
         await mongoose.connect(uri, options);
         console.log('✅ MongoDB connected');
@@ -25,8 +29,8 @@ export async function connectToDatabase() {
         });
     } catch (err) {
         console.error('❌ Failed to connect to MongoDB:', err.message);
+        // Propagate error so the server startup can fail fast
+        throw err;
     }
 }
 
-// Auto-connect when this module is imported
-connectToDatabase();

@@ -1,24 +1,32 @@
-import cors from 'cors';
 import dotenv from 'dotenv';
-import express from 'express';
-import './db.js';
 
-// Load environment variables
+// Load environment variables FIRST
 dotenv.config();
 
-const app = express();
+// --- Environment Variable Check ---
+const requiredEnv = ['MONGODB_URI', 'PORT', 'JWT_SECRET', 'JWT_EXPIRES_IN'];
+const missingEnv = requiredEnv.filter(key => !process.env[key]);
+
+if (missingEnv.length > 0) {
+  console.error(`❌ Missing required environment variables: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
+
+import app from './app.js';
+import { connectToDatabase } from './config/db.js';
+
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+async function startServer() {
+  try {
+    await connectToDatabase();
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to connect to the database:', error.message);
+    process.exit(1);
+  }
+}
 
-// Routes
-app.get('/', (req, res) => {
-  res.json({ message: 'Node.js Backend Server is running!' });
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+startServer(); 
