@@ -1,5 +1,5 @@
-import { Schema, model } from "mongoose";
 import bcrypt from "bcryptjs";
+import { Schema, model } from "mongoose";
 
 // User schema for authentication
 const userSchema = new Schema({
@@ -15,15 +15,18 @@ const userSchema = new Schema({
         type: String,
         required: [true, 'Password is required'],
         minlength: [8, 'Password must be at least 8 characters long']
+    },
+    LLM_API_KEY: {
+        type: String,
     }
 }, {
     timestamps: true
 });
 
 // Hash password before saving
-userSchema.pre('save', async function(next) {
+userSchema.pre('save', async function (next) {
     if (!this.isModified('password')) return next();
-    
+
     try {
         const salt = await bcrypt.genSalt(12);
         this.password = await bcrypt.hash(this.password, salt);
@@ -34,7 +37,7 @@ userSchema.pre('save', async function(next) {
 });
 
 // Compare password method
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
     return await bcrypt.compare(candidatePassword, this.password);
 };
 
@@ -60,16 +63,20 @@ const userChatHistorySchema = new Schema({
         type: String,
         required: true
     },
-    vectorDbCollectionName: {
+    threadId: {
         type: String,
         required: true
     },
+    pdfPaths: [{
+        type: String,
+        required: true
+    }],
     /**
      * Array of chat history entries, each being a reference to a Qna document.
      */
     chatHistory: [{
         type: Schema.Types.ObjectId,
-        ref: "Qna", // Reference to the Qna model                   
+        ref: "Qna", // Reference to the Qna model ,
     }]
 }, {
     timestamps: true
@@ -77,4 +84,4 @@ const userChatHistorySchema = new Schema({
 
 const UserChatHistory = model("UserChatHistory", userChatHistorySchema);
 
-export { User, Qna, UserChatHistory };
+export { Qna, User, UserChatHistory };
