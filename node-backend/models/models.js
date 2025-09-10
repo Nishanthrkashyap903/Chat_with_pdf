@@ -67,6 +67,10 @@ const userChatHistorySchema = new Schema({
         type: String,
         required: true
     },
+    threadName: {
+        type: String,
+        required: true
+    },
     pdfPaths: [{
         type: String,
         required: true

@@ -42,7 +42,6 @@ export const generateThreadIdAndEmbeddings = async (req, res) => {
 
         const apiKey = user.LLM_API_KEY;
 
-
         // Send request to Flask backend to generate embeddings
         const response = await fetch(`${process.env.FLASK_API_URL}/api/embeddings`, {
             method: 'POST',
@@ -76,6 +75,7 @@ export const generateThreadIdAndEmbeddings = async (req, res) => {
         const newChatHistory = new UserChatHistory({
             userId: req.user._id,
             threadId: threadId,
+            threadName: `Chat-History${threadId.slice(0, 5)}`,
             pdfPaths: pdfPaths,
             chatHistory: []
         });
@@ -121,43 +121,122 @@ export const generateAnswersFromQuery = async (req, res) => {
             return res.status(404).json({ error: 'No chat history found for the provided threadId' });
         }
 
-        // 1) Similarity Search -> get chunks
-        const simResp = await fetch(`${process.env.FLASK_API_URL}/api/similaritySearch`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query, threadId, apiKey: user.LLM_API_KEY, topK: 5 })
-        });
-
-        if (!simResp.ok) {
-            const err = await simResp.json().catch(() => ({ message: 'Unknown error' }));
-            if (simResp.status === 404) {
-                return res.status(404).json({ error: 'similaritySearch endpoint not found', detail: err.message });
-            }
-            if (simResp.status === 400) {
-                return res.status(400).json({ error: err.message || 'Invalid request to similaritySearch' });
-            }
-            return res.status(502).json({ error: 'Similarity search failed at Flask service', detail: err.message });
-        }
-
-        const simData = await simResp.json();
-        const chunks = Array.isArray(simData?.chunks) ? simData.chunks : [];
-
-        if (!Array.isArray(chunks) || chunks.length === 0) {
-            return res.status(400).json({ error: 'No relevant chunks found for the query' });
-        }
-
         // Prepare chat history for LLM
         const historyArray = Array.isArray(chatDoc.chatHistory)
             ? chatDoc.chatHistory.map(entry => ({ question: entry.question, answer: entry.answer }))
             : [];
 
-        // 2) LLM Generate -> send query, chunks, apiKey and chat history
+
+        // 1) Query Transform -> get questions for the query
+        const queryTransformResp = await fetch(`${process.env.FLASK_API_URL}/api/queryTransform`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, historyArray, apiKey: user.LLM_API_KEY })
+        });
+
+        if (!queryTransformResp.ok) {
+            const err = await queryTransformResp.json().catch(() => ({ message: 'Unknown error' }));
+            if (queryTransformResp.status === 404) {
+                return res.status(404).json({ error: 'queryTransform endpoint not found', detail: err.message });
+            }
+            if (queryTransformResp.status === 400) {
+                return res.status(400).json({ error: err.message || 'Invalid request to queryTransform' });
+            }
+            return res.status(502).json({ error: 'Query transform failed at Flask service', detail: err.message });
+        }
+
+        const queryTransformData = await queryTransformResp.json();
+        const questions = Array.isArray(queryTransformData?.questions) ? queryTransformData.questions : [];
+
+        console.log("questions", questions);
+
+        // Add the original query to the questions array
+        const allQueries = [
+            { content: query },
+            ...questions
+        ].filter(q => q?.content?.trim());
+
+        // 2) Similarity Search -> get chunks for all queries in parallel
+        const similaritySearches = allQueries.map(async ({ content: question }) => {
+            try {
+                const response = await fetch(`${process.env.FLASK_API_URL}/api/similaritySearch`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query: question,
+                        threadId,
+                        apiKey: user.LLM_API_KEY,
+                        topK: 5
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({
+                        message: 'Unknown error',
+                        status: response.status
+                    }));
+                    throw new Error(
+                        `Similarity search failed for query "${question}": ${error.message || 'Unknown error'}`
+                    );
+                }
+
+                const data = await response.json();
+                return {
+                    question,
+                    chunks: Array.isArray(data?.chunks) ? data.chunks : [],
+                    success: true
+                };
+            } catch (error) {
+                return {
+                    question,
+                    error: error.message,
+                    success: false
+                };
+            }
+        });
+
+        // Wait for all similarity searches to complete
+        const results = await Promise.all(similaritySearches);
+
+        // Process results
+        const failedSearches = results.filter(r => !r.success);
+        const successfulSearches = results.filter(r => r.success);
+        const allChunks = [];
+        const seenChunks = new Set();
+
+        // Collect unique chunks
+        successfulSearches.forEach(({ chunks = [] }) => {
+            chunks.forEach(chunk => {
+                if (chunk && chunk.text && !seenChunks.has(chunk.text)) {
+                    seenChunks.add(chunk.text);
+                    allChunks.push(chunk);
+                }
+            });
+        });
+
+        // Log any failed searches
+        if (failedSearches.length > 0) {
+            console.warn('Some similarity searches failed:', failedSearches);
+        }
+
+        // If all searches failed, return an error
+        if (successfulSearches.length === 0) {
+            return res.status(502).json({
+                error: 'All similarity searches failed',
+                details: failedSearches.map(f => ({
+                    question: f.question,
+                    error: f.error
+                }))
+            });
+        }
+
+        // 3) LLM Generate -> send query, chunks, apiKey and chat history
         const llmResp = await fetch(`${process.env.FLASK_API_URL}/api/llmGenerate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 query,
-                chunks,
+                chunks: allChunks,
                 apiKey: user.LLM_API_KEY,
                 chatHistory: historyArray,
             })
@@ -181,7 +260,7 @@ export const generateAnswersFromQuery = async (req, res) => {
             return res.status(502).json({ error: 'Invalid response from LLM service' });
         }
 
-        // 3) Persist QnA and update chat history
+        // 4) Persist QnA and update chat history
         const qna = await Qna.create({ question: query, answer });
 
         await UserChatHistory.updateOne(
@@ -212,6 +291,28 @@ export const getChatHistory = async (req, res) => {
         return res.status(200).json({ chatHistory: chatDoc.chatHistory });
     } catch (error) {
         console.error('getChatHistory error:', error);
+        return res.status(500).json({ error: 'Internal Server Error', message: error.message });
+    }
+}
+
+// Get all threadIds for the authenticated user
+export const getUserThreadIds = async (req, res) => {
+    try {
+        // verifyToken populates req.user
+        if (!req.user?._id) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+
+        const docs = await UserChatHistory
+            .find({ userId: req.user._id })
+            .sort({ updatedAt: -1 })
+            .select('threadId threadName createdAt updatedAt');
+
+        const threadInfo = docs.map(d => ({ threadId: d.threadId, threadName: d.threadName }));
+
+        return res.status(200).json({ threadInfo, count: threadInfo.length });
+    } catch (error) {
+        console.error('getUserThreadIds error:', error);
         return res.status(500).json({ error: 'Internal Server Error', message: error.message });
     }
 }

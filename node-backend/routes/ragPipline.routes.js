@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { UpdateAPIKey, generateAnswersFromQuery, generateThreadIdAndEmbeddings, getChatHistory } from '../controllers/ragPipeline.controller.js';
+import { UpdateAPIKey, generateAnswersFromQuery, generateThreadIdAndEmbeddings, getChatHistory, getUserThreadIds } from '../controllers/ragPipeline.controller.js';
 import { verifyToken } from '../middleware/auth.middleware.js';
 
 const router = Router();
@@ -15,5 +15,8 @@ router.post('/generateAnswersFromQuery', verifyToken, generateAnswersFromQuery);
 
 // POST /api/v1/rag/getChatHistory (requires authentication) - Input: { threadId }
 router.post('/getChatHistory', verifyToken, getChatHistory);
+
+// GET /api/v1/rag/threads (requires authentication) - Output: { threadIds: string[], count: number }
+router.get('/threads', verifyToken, getUserThreadIds);
 
 export default router;
