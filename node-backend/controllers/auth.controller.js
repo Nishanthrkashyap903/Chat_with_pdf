@@ -41,7 +41,6 @@ export const register = async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
-    console.log(token);
 
     // Set cookie
     res.cookie('token', token, {

@@ -11,6 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from openai import OpenAI
+from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
@@ -160,7 +161,6 @@ def embeddings():
 
     # Chunking
     chunks = split_documents(docs)
-    print("chunks: ", len(chunks))
 
     # Embeddings and upsert into Qdrant
     try:
@@ -188,6 +188,133 @@ def embeddings():
         ),
         200,
     )
+
+
+class Question(BaseModel):
+    content: str
+
+
+class Questions(BaseModel):
+    allQuestions: list[Question]
+
+
+def query_to_llm(model, messages, api_key):
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+
+    response = client.beta.chat.completions.parse(
+        model="gemini-2.0-flash", messages=messages, response_format=model
+    )
+
+    return response.choices[0].message.parsed
+
+
+def process_chat_history(history):
+    """
+    Convert chat history into a list of message dictionaries.
+    """
+    messages = []
+    if not isinstance(history, list):
+        return messages
+
+    for item in history:
+        try:
+            if not isinstance(item, dict):
+                continue
+
+            # Process question if exists
+            if "question" in item and item["question"] is not None:
+                messages.append({"role": "user", "content": str(item["question"])})
+
+            # Process answer if exists
+            if "answer" in item and item["answer"] is not None:
+                messages.append({"role": "assistant", "content": str(item["answer"])})
+        except (TypeError, ValueError) as e:
+            app.logger.warning(f"Skipping invalid chat item: {item}, error: {e}")
+            continue
+
+    return messages
+
+
+@app.route("/api/queryTransform", methods=["POST"])
+def queryTransform():
+    data = request.get_json(silent=True) or {}
+    query = data.get("query")
+    historyArray = data.get("historyArray")
+    api_key = data.get("apiKey")
+
+    # Validate inputs
+    if not isinstance(query, str) or not query.strip():
+        return (
+            jsonify({"message": "'query' is required and must be a non-empty string"}),
+            400,
+        )
+    if not isinstance(api_key, str) or not api_key.strip():
+        return (
+            jsonify({"message": "'apiKey' is required and must be a non-empty string"}),
+            400,
+        )
+    if not isinstance(historyArray, list):
+        return (
+            jsonify({"message": "'historyArray' must be a list"}),
+            400,
+        )
+
+    try:
+        ensure_google_api_key(api_key)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+
+    query_transform_prompt = """
+    You are a helpful AI assistant who is specialized in resolving complex queries and thinks before respond to any queries 
+    your job is to take the user query and chat History to generate {n} questions which are similar to the user query as shown in the example
+    
+    Example: 
+    User Query : What is fs module in node js? 
+    Output: {format}
+    """
+
+    example_format = {
+        "allQuestions": [
+            {"content": "How does node js works under the hood? "},
+            {"content": "What is fs module? "},
+            {"content": "What is module in js? "},
+        ]
+    }
+
+    # Process chat history
+    messages = process_chat_history(historyArray)
+
+    # System Prompt
+    messages.append(
+        {
+            "role": "system",
+            "content": query_transform_prompt.format(n=5, format=example_format),
+        }
+    )
+    # User Query
+    messages.append({"role": "user", "content": query})
+
+    try:
+        # Get response from LLM
+        response = query_to_llm(Questions, messages, api_key)
+
+        # Transform response to the desired format
+        questions = [{"content": q.content} for q in response.allQuestions]
+
+        return jsonify({"questions": questions}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error in query transformation: {str(e)}")
+        return (
+            jsonify(
+                {"error": "Failed to process query transformation", "detail": str(e)}
+            ),
+            500,
+        )
 
 
 @app.route("/api/similaritySearch", methods=["POST"])
@@ -312,8 +439,6 @@ def llmGenerate():
                 chunk_texts.append(text)
     all_chunks = "\n\n---\n\n".join(chunk_texts)
 
-    print("all_chunks: ", all_chunks)
-
     system_prompt = f"""
     You are an intelligent chatbot who answers user queries based on the Given context by breaking the complex query into simple queries and then answers the user queries by following the set of rules.
 
@@ -327,19 +452,8 @@ def llmGenerate():
     {all_chunks}
     """
 
-    # Chat history of the user
-    messages = []
-    if isinstance(chat_history, list):
-        for item in chat_history:
-            try:
-                q = item.get("question") if isinstance(item, dict) else None
-                a = item.get("answer") if isinstance(item, dict) else None
-                if q:
-                    messages.append({"role": "user", "content": str(q)})
-                if a:
-                    messages.append({"role": "assistant", "content": str(a)})
-            except Exception:
-                continue
+    # Process chat history using the reusable function
+    messages = process_chat_history(chat_history)
     # System prompt
     messages.append({"role": "system", "content": system_prompt})
     # User query
